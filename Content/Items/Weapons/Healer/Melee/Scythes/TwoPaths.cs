@@ -1,33 +1,44 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using Terraria;
-using Terraria.ModLoader;
+﻿using System.Collections.Generic;
+using CalamityMod;
 using CalamityMod.Items;
 using CalamityMod.Items.Materials;
 using CalamityMod.Rarities;
-using ThoriumMod.Items.HealerItems;
+using CalamityMod.Tiles.Furniture.CraftingStations;
+using InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes;
+using InfernalEclipseWeaponsDLC.Core.Players;
+using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
+using Terraria;
 using Terraria.DataStructures;
 using Terraria.ID;
-using InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes;
-using CalamityMod.Tiles.Furniture.CraftingStations;
-using Microsoft.Xna.Framework;
-using CalamityMod.Projectiles.Magic;
-using ThoriumMod;
-using InfernalEclipseWeaponsDLC.Content.Projectiles;
-using ThoriumMod.Items.BossThePrimordials.Dream;
-using CalamityMod;
 using Terraria.Localization;
+using Terraria.ModLoader;
+using ThoriumMod.Items.BossThePrimordials.Dream;
+using ThoriumMod.Items.HealerItems;
 
 namespace InfernalEclipseWeaponsDLC.Content.Items.Weapons.Healer.Melee.Scythes
 {
     public class TwoPaths : ScytheItem
     {
+        // Left swings last about 60 ticks at base speed, like Calamity Hunt's Scythe of the Old God.
+        private const float DarkTimeScale = 2f;
+
+        private int swingDirection = 1;
+        internal int spin;
+        private int darkStage;
+
+        // Animated sheet (20 frames x 3 ticks: gold and crimson bolts off each blade, breathing halo, blood drip, edge glint;
+        // tools/make_held_animation.py).
+        // TwoPaths.png stays the single still frame that the swing projectiles draw.
+        public override string Texture => base.Texture + "Animated";
+
         public override void SetStaticDefaults()
         {
             SetStaticDefaultsToScythe();
+            Main.RegisterItemAnimation(Type, new DrawAnimationVertical(3, 20));
+            ItemID.Sets.AnimatesAsSoul[Type] = true;
+            ItemID.Sets.ItemsThatAllowRepeatedRightClick[Type] = true;
+            ItemID.Sets.SkipsInitialUseSound[Type] = true;
         }
 
         public override void SetDefaults()
@@ -39,10 +50,12 @@ namespace InfernalEclipseWeaponsDLC.Content.Items.Weapons.Healer.Melee.Scythes
             Item.height = 190;
             Item.value = CalamityGlobalItem.RarityHotPinkBuyPrice;
             Item.rare = ModContent.RarityType<HotPink>();
-            Item.shoot = ModContent.ProjectileType<TwoPathsPro>();
+            Item.shoot = ModContent.ProjectileType<TwoPathsDarkHeld>();
+            Item.useTime = Item.useAnimation = 30;
+            Item.useStyle = ItemUseStyleID.Shoot;
+            Item.holdStyle = 6;
+            Item.noUseGraphic = true;
             Item.autoReuse = true;
-            ItemID.Sets.ItemsThatAllowRepeatedRightClick[Type] = true;
-            Item.mana = 20;
             Item.Calamity().devItem = true;
         }
 
@@ -88,39 +101,56 @@ namespace InfernalEclipseWeaponsDLC.Content.Items.Weapons.Healer.Melee.Scythes
 
         public override bool CanUseItem(Player player)
         {
+            if (player.ownedProjectileCounts[ModContent.ProjectileType<TwoPathsDarkHeld>()] > 0 || player.ownedProjectileCounts[ModContent.ProjectileType<TwoPathsLightHeld>()] > 0
+                || player.ownedProjectileCounts[ModContent.ProjectileType<TwoPathsBalanceSpin>()] > 0)
+                return false;
             return base.CanUseItem(player);
         }
 
         public override bool Shoot(Player player, EntitySource_ItemUse_WithAmmo source, Vector2 position, Vector2 velocity, int type, int damage, float knockback)
         {
-            if (player.altFunctionUse == 2) // Right-click (Recitation-style attack)
+            Vector2 aim = (Main.MouseWorld - player.MountedCenter).SafeNormalize(Vector2.UnitX * player.direction);
+            float time = player.itemAnimationMax > 0 ? (player.itemAnimationMax > player.itemTimeMax ? player.itemTimeMax : player.itemAnimationMax) : Item.useAnimation;
+            // In balance both buttons bring out the whole scythe and spin it.
+            if (player.GetModPlayer<TwoPathsPlayer>().Balance)
             {
-                float spread = 60f * 0.0174f;
-                double startAngle = Math.Atan2(velocity.X, velocity.Y) - spread / 2;
-                double deltaAngle = spread / 6f;
-                double offsetAngle;
-                int i;
-                for (i = 0; i < 3; i++)
-                {
-                    offsetAngle = startAngle + deltaAngle * (i + i * i) / 2f + 32f * i;
-                    Projectile.NewProjectile(source, player.Center.X, player.Center.Y, (float)(Math.Sin(offsetAngle) * 2f), (float)(Math.Cos(offsetAngle) * 2f), ModContent.ProjectileType<WhiteScythe>(), (int)Math.Round(damage * 0.3f), knockback, Main.myPlayer, 0f, 0f);
-                    Projectile.NewProjectile(source, player.Center.X, player.Center.Y, (float)(-Math.Sin(offsetAngle) * 2f), (float)(-Math.Cos(offsetAngle) * 2f), ModContent.ProjectileType<WhiteScythe>(), (int)Math.Round(damage * 0.3f), knockback, Main.myPlayer, 0f, 0f);
-                }
-
-                // ai[0] = 1 => right-click version (small)
-                Projectile.NewProjectile(source, new Vector2(player.Center.X, player.Center.Y), velocity, type, (int)Math.Round(damage * 0.3f), knockback, player.whoAmI, 1);
+                Projectile.NewProjectile(source, player.MountedCenter, aim, ModContent.ProjectileType<TwoPathsBalanceSpin>(), damage, knockback, player.whoAmI, player.direction);
+                return false;
+            }
+            if (player.altFunctionUse == 2)
+            {
+                int index = Projectile.NewProjectile(source, player.MountedCenter, aim, ModContent.ProjectileType<TwoPathsLightHeld>(), damage, knockback, player.whoAmI, time, time);
+                Main.projectile[index].direction = swingDirection;
+                Main.projectile[index].netUpdate = true;
+                swingDirection = -swingDirection;
+                if (++spin > 3)
+                    spin = 1;
                 return false;
             }
 
-            // Left-click version (large), ai[0] = 0
-            Projectile.NewProjectile(source, new Vector2(player.Center.X, player.Center.Y), velocity, type, damage, knockback, player.whoAmI, 0);
+            float darkTime = time * DarkTimeScale;
+            Projectile.NewProjectile(source, player.MountedCenter, aim, type, damage, knockback, player.whoAmI, darkTime, darkTime, darkStage);
+            darkStage = (darkStage + 1) % 3;
             return false;
         }
 
-        public override void ModifyManaCost(Player player, ref float reduce, ref float mult)
+        // The emissive parts of the animated sheet (lightning, halo glow, edge glint) at full brightness on the ground too.
+        public override void PostDrawInWorld(SpriteBatch spriteBatch, Color lightColor, Color alphaColor, float rotation, float scale, int whoAmI)
         {
-            if (player.altFunctionUse != 2) // left-click
-                mult = 0f; // free
+            Texture2D glow = ModContent.Request<Texture2D>(Texture + "_Glow").Value;
+            Rectangle frame = Main.itemAnimations[Type].GetFrame(glow);
+            Vector2 origin = frame.Size() / 2f;
+            spriteBatch.Draw(glow, Item.position - Main.screenPosition + origin, frame, Color.White, rotation, origin, scale, SpriteEffects.None, 0f);
+        }
+
+        public override void HoldStyle(Player player, Rectangle heldItemFrame)
+        {
+            player.itemLocation += new Vector2(-15f, 12f) * player.Directions;
+        }
+
+        public override void UseStyle(Player player, Rectangle heldItemFrame)
+        {
+            player.itemLocation = Vector2.Zero;
         }
     }
 }

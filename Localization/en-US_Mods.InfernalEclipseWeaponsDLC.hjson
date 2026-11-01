@@ -1028,6 +1028,13 @@ Projectiles: {
 	}
 
 	TwoPathsPro2.DisplayName: Two Paths
+	TwoPathsDarkHeld.DisplayName: Two Paths
+	TwoPathsLightHeld.DisplayName: Two Paths
+	TwoPathsJudgmentSlash.DisplayName: Judgment Slash
+	TwoPathsRift.DisplayName: Rift
+	TwoPathsSkull.DisplayName: Wailing Skull
+	TwoPathsErosion.DisplayName: Erosion Mark
+	TwoPathsBalanceSpin.DisplayName: Two Paths
 	TheParallellPro.DisplayName: The Parallell
 	BellBalladEleum.DisplayName: Eleum Bell
 	BellBalladHavoc.DisplayName: Havoc Bell

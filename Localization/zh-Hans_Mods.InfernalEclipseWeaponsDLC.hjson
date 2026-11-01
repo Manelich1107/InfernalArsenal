@@ -1064,6 +1064,13 @@ Projectiles: {
 	}
 
 	TwoPathsPro2.DisplayName: 神冥歧径
+	TwoPathsDarkHeld.DisplayName: 神冥歧径
+	TwoPathsLightHeld.DisplayName: 神冥歧径
+	TwoPathsJudgmentSlash.DisplayName: 审判斩
+	TwoPathsRift.DisplayName: 裂隙
+	TwoPathsSkull.DisplayName: 冤魂
+	TwoPathsErosion.DisplayName: 侵蚀斩痕
+	TwoPathsBalanceSpin.DisplayName: 神冥歧径
 	TheParallellPro.DisplayName: 平行音律
 	BellBalladEleum.DisplayName: 怜钟之歌
 	BellBalladHavoc.DisplayName: 乱钟之歌
