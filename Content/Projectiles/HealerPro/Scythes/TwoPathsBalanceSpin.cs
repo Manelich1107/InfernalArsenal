@@ -12,52 +12,73 @@ using ThoriumMod.Projectiles.Scythe;
 
 namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
 {
-    // Balance: the whole double-headed scythe comes out and spins while either button is held, draining both energies.
-    // It merges the two sides: a red trail behind the dark blade and a gold one behind the light blade, judgment slashes
-    // through the cursor that leave erosion marks, blood skulls from the chest, and every so often a gold-edged dark rift
-    // crossed by a judgment slash (an X) on every enemy nearby. When the energy runs out it ends with a bigger X.
-    // The first spin of a balance opens with the merge: the dark and light halves fly in from both sides, lock together at
-    // the hand into the whole scythe, and it spins up straight into the spin.
-    // ai[0] = spin direction (1 or -1), ai[1] = 1 for the merge intro; velocity holds the aim.
+    // 【平衡旋转】两条能量都满（平衡状态）时，左右键都会生成这个弹幕：拿出完整的双头镰，握着杆身中段持续旋转。
+    // - 按住左键或右键就一直转，松开就停，剩下的能量留到下次。只在旋转时消耗，两边一起扣，满能量约转 6 秒。
+    // - 合并光暗两边的特点：暗刃拖赤黑拖影、光刃拖白金拖影；
+    //   光：每 0.5 秒一道审判斩穿过光标，打中的敌人身上浮现侵蚀斩痕（TwoPathsErosion）；
+    //   暗：每 0.5 秒从胸口飞出两只冤魂；
+    //   交汇：每 1.5 秒，640 像素内每个敌人身上开一道金边暗裂隙，再被一道审判斩交叉成 X。
+    // - 能量耗尽时的终结：960 像素内所有敌人身上出现 X，玩家身上再交叉出一个贯穿全屏的大 X，重震屏，然后收回镰刀。
+    // - 一次平衡的第一次旋转带“双镰合一”开场：暗、光两半从两侧转着飞到手上，合成整把镰刀，然后从静止加速进入旋转。
+    //   开场由 TwoPathsPlayer.StartMerge 在进入平衡时生成（ai[1] = 1）；之后再按键生成的旋转没有开场。
+    // - 旋转本身和它放出的所有弹幕都不充能（TwoPathsPlayer.BeginBalanceAttack）。
+    // ai[0] = 旋转方向（1 或 -1），ai[1] = 1 表示带合一开场；velocity 存瞄准方向（单位向量）。
+    // 大部分逻辑只在弹幕主人的客户端运行（读光标、扣能量、放弹幕），其他客户端只跟着画。
     public class TwoPathsBalanceSpin : ScythePro
     {
+        // 转速：18 tick 一圈。
         private const float SpinSpeed = MathHelper.TwoPi / 18f;
+        // 判定线比画面上的刀尖再长 10%，粗 60 × 尺寸。
         private const float HitReachFactor = 1.1f;
         private const float HitWidth = 60f;
+        // 刀身打得很频繁，只用武器伤害的 35%；冤魂也是 35%；审判斩、裂隙用全额。
         private const float SpinDamage = 0.35f;
         private const float SkullDamage = 0.35f;
+        // 审判斩、冤魂、X 脉冲的间隔（tick）。三者错开发出，不在同一 tick 挤在一起。
         private const int SlashInterval = 30;
         private const int SkullInterval = 30;
         private const int CrossInterval = 90;
+        // X 脉冲的范围；终结时的范围、大 X 里裂隙的长度、大 X 里审判斩的放大倍数。
         private const float CrossRadius = 640f;
         private const float FinaleRadius = 960f;
         private const float FinaleRiftLength = 1400f;
         private const float FinaleSlashScale = 2.5f;
+        // 拖影记录最近 9 tick 的角度，最长拖到身后约 150°。
         private const int TrailLength = 9;
         private const float TrailAngle = 2.6f;
+        // 合一开场：两半飞行 20 tick，合上后 12 tick 加速到全速，开场结束后至少再转 18 tick（一圈）才响应松键。
         private const int IntroFlight = 20;
         private const int IntroSpinUp = 12;
         private const int IntroMinSpin = 18;
+        // 光端那一半的出发点（相对手的位置，朝右时；朝左时左右镜像），暗端那一半从对称的另一侧出发。
         private static readonly Vector2 IntroStart = new(170f, -70f);
 
+        // 这个弹幕已经存在了多少 tick。
         private int age;
         private int attackId;
+        // 武器原本的伤害（Projectile.damage 被改成了刀身的 35%，放出的弹幕用这个全额值）。
         private int baseDamage;
+        // 两端各自最近几 tick 的角度（暗端 = 光端 + 180°），给两条拖影用。
         private readonly float[] lightTrail = new float[TrailLength];
         private readonly float[] darkTrail = new float[TrailLength];
         private int trailCount;
 
+        // 弹幕本身的贴图（实际绘制在 PreDraw 里自己做）。
         public override string Texture => TwoPathsHelper.TexturePath;
 
+        // 从握点（杆身中段）到任一端刀尖的距离。
         private float Reach => TwoPathsHelper.FullReach * Projectile.scale;
         private bool Intro => Projectile.ai[1] == 1f;
+        // 开场在第几 tick 结束（没有开场就是 0）。
         private int IntroEnd => Intro ? IntroFlight + IntroSpinUp : 0;
+        // 两半是否已经合上（没有开场的旋转一开始就是合上的）。
         private bool Merged => !Intro || age >= IntroFlight;
 
         public override void SafeSetDefaults()
         {
             Projectile.width = 40;
             Projectile.height = 40;
+            // 每个敌人单独计无敌帧，10 tick 后可以再被刀身打中。
             Projectile.usesIDStaticNPCImmunity = false;
             Projectile.usesLocalNPCImmunity = true;
             Projectile.localNPCHitCooldown = 10;
@@ -71,13 +92,15 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
             Projectile.rotation = Projectile.velocity.ToRotation();
             if (player.whoAmI != Main.myPlayer)
                 return;
-            // The blade itself hits often, so it does a share of the weapon damage; the slashes, skulls and rifts use the full value.
+            // 刀身打得很频繁，只用武器伤害的一部分；审判斩、冤魂、裂隙按 baseDamage 计算。
             baseDamage = Projectile.damage;
             Projectile.damage = (int)(baseDamage * SpinDamage);
+            // 领一个“不充能”的出手编号。
             attackId = player.GetModPlayer<TwoPathsPlayer>().BeginBalanceAttack();
             SoundEngine.PlaySound((Intro ? SoundID.Item8 : SoundID.Item71) with { Pitch = -0.5f }, player.Center);
         }
 
+        // 每 tick 的逻辑。返回 false 跳过基类和原版的 AI。
         public override bool PreAI()
         {
             Player player = Main.player[Projectile.owner];
@@ -90,7 +113,7 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
 
             if (player.whoAmI == Main.myPlayer)
             {
-                // The intro always plays out and turns once more, even with no button held.
+                // 松键就停。合一开场例外：开场一定播完，并且之后至少再转一圈，即使没有按键。
                 bool held = player.controlUseItem || player.controlUseTile;
                 if (!modPlayer.Balance || (!held && age >= IntroEnd + (Intro ? IntroMinSpin : 0)))
                 {
@@ -98,6 +121,7 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
                     return false;
                 }
 
+                // 开场结束后开始扣能量；两边都扣光时播放终结并收回。
                 if (age >= IntroEnd)
                 {
                     modPlayer.DrainBalance(TwoPathsPlayer.BalanceDrainPerTick);
@@ -109,7 +133,8 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
                     }
                 }
 
-                // The aim stays put while the halves fly in, so they lock where they were heading.
+                // 合上之后手臂跟着光标转向。两半还在飞的时候不改方向，这样它们会在原来飞向的位置合上。
+                // 方向变化明显时才发网络同步，免得每 tick 都发包。
                 if (Merged)
                 {
                     Vector2 aim = (Main.MouseWorld - player.MountedCenter).SafeNormalize(Vector2.UnitX * player.direction);
@@ -123,13 +148,13 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
                     Emit(player, age - IntroEnd);
             }
 
+            // 每 tick 续命，弹幕只靠上面的条件结束；同时让玩家一直处于出手状态。
             Projectile.timeLeft = 2;
             player.itemTime = player.itemAnimation = 2;
             player.heldProj = Projectile.whoAmI;
             player.ChangeDir(Projectile.velocity.X >= 0f ? 1 : -1);
 
-            // The hand holds the middle of the shaft out toward the cursor while the scythe spins around it.
-            // After the merge it spins up from standstill to full speed.
+            // 手握杆身中段伸向光标，镰刀绕着手转。合一开场里：两半飞行时不转，合上后按平方曲线从静止加速到全速。
             float speed = SpinSpeed;
             if (Intro && age < IntroEnd)
                 speed = age < IntroFlight ? 0f : SpinSpeed * MathF.Pow((age - IntroFlight) / (float)IntroSpinUp, 2f);
@@ -137,8 +162,10 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
             float armRotation = Projectile.velocity.ToRotation() - MathHelper.PiOver2;
             player.SetCompositeArmFront(true, Player.CompositeArmStretchAmount.Full, armRotation);
             Projectile.Center = player.GetFrontHandPosition(Player.CompositeArmStretchAmount.Full, armRotation);
+            // 统一尺寸：物品的近战尺寸加成 × SwingScale。
             Projectile.scale = player.GetAdjustedItemScale(player.HeldItem) * TwoPathsHelper.SwingScale;
 
+            // 记录两端角度给拖影。Projectile.rotation 是光刃所指的方向，暗刃在它对面。
             for (int i = TrailLength - 1; i > 0; i--)
             {
                 lightTrail[i] = lightTrail[i - 1];
@@ -150,13 +177,14 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
 
             if (Merged)
             {
+                // 每转一圈（18 tick）响一声挥动音，同时最多两个实例。
                 if ((age - IntroEnd) % 18 == 0)
                     SoundEngine.PlaySound(SoundID.DD2_MonkStaffSwing with { Pitch = -0.3f, Volume = 0.5f, MaxInstances = 2 }, player.Center);
                 SpawnSparks();
             }
             else
             {
-                // A trail of sparks behind each flying half.
+                // 两半飞行途中各自拖一串火花：暗端暗影焰，光端金焰。
                 IntroPositions(out Vector2 darkPosition, out Vector2 lightPosition, out _);
                 Dust dark = Dust.NewDustPerfect(darkPosition + Main.rand.NextVector2Circular(12f, 12f), DustID.Shadowflame, Vector2.Zero);
                 dark.noGravity = true;
@@ -169,8 +197,10 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
             return false;
         }
 
-        // Where the flying halves are during the intro, and how far each still has to turn (the dark one turns the other way).
-        // The light half comes from the side the light blade will point to (the facing side), the dark half from behind.
+        // 合一开场里两半此刻的位置，以及各自还要转多少（暗端那一半反方向转）。
+        // 光端那一半从光刃将要指向的那一侧（也就是面朝的一侧）飞来，暗端那一半从身后飞来。
+        // 位置按三次方缓入：开始慢、最后猛地合上。两半都还要再转 1.25 圈，合上时正好转到位。
+        // lag 用来画落后几 tick 的残影。
         private void IntroPositions(out Vector2 darkPosition, out Vector2 lightPosition, out float turn, float lag = 0f)
         {
             float progress = MathHelper.Clamp((age - lag) / IntroFlight, 0f, 1f);
@@ -182,7 +212,8 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
             turn = (1f - eased) * MathHelper.TwoPi * 1.25f;
         }
 
-        // The halves meet: a clink, the balance burst (X of gold and violet sparks, a shake) and a ring at the hand.
+        // 两半合上的那一刻：一声金属碰撞，进入平衡的特效（X 形金紫尘埃和轻震屏，见 TwoPathsPlayer.BalanceEntryEffects），
+        // 镜头冲击，手上再爆一圈金紫尘埃。
         private void Lock(Player player, TwoPathsPlayer modPlayer)
         {
             SoundEngine.PlaySound(SoundID.Item37 with { Pitch = -0.3f }, player.Center);
@@ -197,8 +228,10 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
             }
         }
 
-        // Light: a judgment slash through the cursor. Dark: two skulls from the chest. Together: an X on every enemy nearby.
-        // tick counts from the end of the intro.
+        // 按节奏放出攻击。tick 从开场结束时开始计。
+        // 光：tick 0、30、60……一道审判斩穿过光标（斜 ±45° 随机一边，ai[2] = 1 表示命中后挂侵蚀斩痕）。
+        // 暗：tick 15、45、75……从胸口朝两端刀刃的方向各飞出一只冤魂。
+        // 交汇：tick 45、135、225……一次 X 脉冲。
         private void Emit(Player player, int tick)
         {
             if (tick % SlashInterval == 0)
@@ -221,7 +254,8 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
                 CrossPulse(player, CrossRadius, 4f);
         }
 
-        // Every enemy in range gets a gold-edged dark rift that a judgment slash crosses (an X); a ring of both colours shows the range.
+        // X 脉冲：radius 内、视线可达的每个敌人身上开一道金边暗裂隙（TwoPathsRift.BalanceDarkStyle），
+        // 裂隙自己会在裂开后放一道审判斩交叉过去，形成 X。同时从角色身上扩散一圈金色和暗影焰尘埃标出范围，punch 是镜头冲击强度。
         private void CrossPulse(Player player, float radius, float punch)
         {
             SoundEngine.PlaySound(SoundID.DD2_BetsyFireballImpact with { Pitch = -0.4f, Volume = 0.8f }, player.Center);
@@ -243,7 +277,8 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
             }
         }
 
-        // The energy is spent: an X on every enemy in a wider range, a giant X through the player, and a heavy shake.
+        // 能量耗尽的终结：先对更大范围（FinaleRadius）放一次 X 脉冲，再以玩家为中心交叉出一个大 X：
+        // 一道 1400 像素长的金边暗裂隙（瞄准方向 +45°）和一道放大 2.5 倍的审判斩（-45°），沿两条线撒尘埃，配重震屏和音效。
         private void Finale(Player player)
         {
             CrossPulse(player, FinaleRadius, 10f);
@@ -269,11 +304,13 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
             }
         }
 
+        // 镜头冲击（沿 direction 方向推一下，持续 16 tick），只影响本地镜头。
         private static void Punch(Player player, Vector2 direction, float strength)
         {
             Main.instance.CameraModifiers.Add(new PunchCameraModifier(player.Center, direction, strength, 10f, 16, 1000f, "TwoPathsBalance"));
         }
 
+        // 两端刀刃沿切线甩出火花：光端金焰，暗端红色火焰。
         private void SpawnSparks()
         {
             for (int end = 0; end < 2; end++)
@@ -286,16 +323,18 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
             }
         }
 
+        // 两半合上之前不造成伤害。
         public override bool? CanDamage() => Merged ? null : false;
 
         public override bool? Colliding(Rectangle projHitbox, Rectangle targetHitbox)
         {
-            // Both blades cut: the line runs from tip to tip through the hand.
+            // 两端刀刃都能砍：判定线从一端刀尖穿过手连到另一端刀尖。
             Vector2 tip = Projectile.rotation.ToRotationVector2() * Reach * HitReachFactor;
             float collisionPoint = 0f;
             return Collision.CheckAABBvLineCollision(targetHitbox.TopLeft(), targetHitbox.Size(), Projectile.Center - tip, Projectile.Center + tip, HitWidth * Projectile.scale, ref collisionPoint);
         }
 
+        // 命中：报给能量系统（平衡期间不充能，只重置衰减计时），命中音（有限流）和金红火花。
         public override void SafeOnHitNPC(NPC target, NPC.HitInfo hit, int damageDone)
         {
             TwoPathsHelper.Credit(Projectile, TwoPathsSide.Light, attackId);
@@ -308,13 +347,14 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
             }
         }
 
+        // 绘制。合一开场时画两半飞来；合上后画两条拖影和整把镰刀。返回 false 不让原版再画一次弹幕贴图。
         public override bool PreDraw(ref Color lightColor)
         {
             Color color = Color.Lerp(lightColor, Color.White, 0.5f);
             if (!Merged)
             {
-                // The halves fly in turning, with fading afterimages; each is laid out on the whole scythe's canvas,
-                // so at the hand they line up into the whole scythe.
+                // 两半转着飞来，各带 3 个渐隐的残影（叠加混合，暗端深红、光端金色）。
+                // 两半贴图和整把镰刀在同一张画布上，所以用 DrawFullScythe 画，到手上时正好拼成整把。
                 for (int ghost = 3; ghost >= 0; ghost--)
                 {
                     IntroPositions(out Vector2 darkPosition, out Vector2 lightPosition, out float turn, ghost * 1.5f);
