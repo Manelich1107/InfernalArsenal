@@ -28,8 +28,10 @@ namespace InfernalEclipseWeaponsDLC.Content.Items.Weapons.Healer.Melee.Scythes
     //   Core/Players/TwoPathsPlayer.cs     暗、光两条能量（0~100）：命中充能、脱战衰减、进入和退出平衡。
     //   Core/TwoPathsGauge.cs              脚下的光暗能量条 UI（只在本地客户端更新和绘制）。
     //   Core/TwoPathsSystem.cs             注册和接线：灵魂精华映射、能量条界面层、卸载清理。
+
     //   Core/Players/TwoPathsHoldLayer.cs  不攻击时握在手里的动态贴图（装了 WeaponOutLite 时让给它画）。
     //   Core/ModIntegrationsSystem.cs      向 WeaponOutLite 注册这把武器（不属于这次重做，沿用原代码）。
+
     //   Content/Projectiles/HealerPro/Scythes/ 下：
     //     TwoPathsHelper.cs        公用工具：贴图路径、握点几何、统一尺寸 SwingScale、刀光拖影绘制、配色、命中音。
     //     TwoPathsJudgmentSlash.cs 审判斩：一道快速划过的金白斩线。
@@ -37,6 +39,7 @@ namespace InfernalEclipseWeaponsDLC.Content.Items.Weapons.Healer.Melee.Scythes
     //     TwoPathsSkull.cs         冤魂：追踪骷髅，借用灾厄盖尔鲜血头颅（GaelSkull）的贴图。
     //     TwoPathsErosion.cs       侵蚀斩痕：平衡旋转的审判斩命中后，在敌人身上反复浮现的暗色斩痕。
     //     TwoPathsPro.cs、TwoPathsPro2.cs 是重做前的旧弹幕，现在没有任何代码引用，留待清理。
+
     // 贴图（都是测试美术，等待重绘；生成脚本在仓库外的 TwoPathsWork/tools，不在仓库里）：
     //   TwoPaths.png               攻击弹幕画的静态整把镰刀，208×190，整张按 2×2 像素块绘制。
     //   TwoPathsAnimated.png       物品栏、地上、手持用的 20 帧动态贴图（每帧 3 tick）；_Glow 是同排版的发光层。
@@ -142,7 +145,8 @@ namespace InfernalEclipseWeaponsDLC.Content.Items.Weapons.Healer.Melee.Scythes
         // 所以挥砍途中的点击会被忽略，每一刀都会完整播完。
         public override bool CanUseItem(Player player)
         {
-            if (player.ownedProjectileCounts[ModContent.ProjectileType<TwoPathsDarkHeld>()] > 0 || player.ownedProjectileCounts[ModContent.ProjectileType<TwoPathsLightHeld>()] > 0
+            if (player.ownedProjectileCounts[ModContent.ProjectileType<TwoPathsDarkHeld>()] > 0 
+                || player.ownedProjectileCounts[ModContent.ProjectileType<TwoPathsLightHeld>()] > 0
                 || player.ownedProjectileCounts[ModContent.ProjectileType<TwoPathsBalanceSpin>()] > 0)
                 return false;
             return base.CanUseItem(player);

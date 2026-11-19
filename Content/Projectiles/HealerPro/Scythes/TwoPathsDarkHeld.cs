@@ -9,6 +9,7 @@ using Terraria.Graphics.CameraModifiers;
 using Terraria.ID;
 using Terraria.ModLoader;
 using ThoriumMod.Projectiles.Scythe;
+using InfernalEclipseWeaponsDLC.Core;
 
 namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
 {
@@ -48,7 +49,7 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
         // 每一段的参数（角色朝右时的数值，朝左时镜像）。角度单位是度，相对瞄准方向；屏幕坐标 y 向下，所以正角度是顺时针。
         // 三段首尾相接：-150 → 140 → -150 → 570（570 = -150 + 720，大旋转正好转两整圈，转完回到正手的起点）。
         private static readonly float[] StartAngle = { -150f, 140f, -150f };
-        private static readonly float[] EndAngle = { 140f, -150f, 570f };
+        private static readonly float[] EndAngle = [ 140f, -150f, 570f ];
         // 造成伤害的时间段，用这一刀进度（0~1）表示。正手和反手是 50%~64%，大旋转是 35%~71%。
         private static readonly float[] FastStart = { 0.5f, 0.5f, 0.35f };
         private static readonly float[] FastEnd = { 0.64f, 0.64f, 0.71f };

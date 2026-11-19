@@ -7,6 +7,8 @@ using Terraria.GameContent;
 using Terraria.ID;
 using Terraria.ModLoader;
 using ThoriumMod;
+using InfernalEclipseWeaponsDLC.Core;
+
 
 namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
 {

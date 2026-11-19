@@ -1,17 +1,25 @@
-﻿using System.Collections.Generic;
-using InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes;
+﻿using InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes;
+using InfernalEclipseWeaponsDLC.Core.Players;
+using Luminance.Common.Utilities;
+using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
+using System;
+using System.Collections.Generic;
 using Terraria;
+using Terraria.Audio;
+using Terraria.DataStructures;
+using Terraria.GameContent;
+using Terraria.ID;
 using Terraria.ModLoader;
 using Terraria.UI;
 using ThoriumMod.Items.HealerItems;
 using ThoriumMod.UI.ResourceBars;
+using static Terraria.GameContent.Animations.Actions.Sprites;
 
 namespace InfernalEclipseWeaponsDLC.Core
 {
-    // 【神冥歧径的全局接线】
-    // - 把右键攻击和平衡旋转登记进瑟银的灵魂精华映射，让它们直接命中也给灵魂精华。
-    // - 每帧更新能量条状态，并把能量条作为一个界面层插进游戏 UI，叠在瑟银的计量条栈里。
-    // - 卸载模组时释放刀光拖影用的绘图资源。
+    //把右键攻击和平衡旋转登记进瑟银的灵魂精华映射，让它们直接命中也给灵魂精华
+    //绘制能量条并覆盖瑟银资源条，卸载刀光拖影
     public class TwoPathsSystem : ModSystem
     {
         public override void PostSetupContent()
@@ -43,7 +51,7 @@ namespace InfernalEclipseWeaponsDLC.Core
             layers.Insert(index, new LegacyGameInterfaceLayer("InfernalEclipseWeaponsDLC: Two Paths Gauge", DrawGauge, InterfaceScaleType.Game));
         }
 
-        // 打开设置或其他游戏内界面时不画。画完把瑟银计量条栈的偏移往下推 StackHeight，
+        // 打开设置或其他游戏内界面时不画。画完把瑟银计量条栈的偏移往下推 stackHeight，
         // 这样和瑟银自己画在脚下的计量条上下排开，不会重叠。
         private static bool DrawGauge()
         {
@@ -51,8 +59,623 @@ namespace InfernalEclipseWeaponsDLC.Core
                 return true;
 
             TwoPathsGauge.Draw(Main.LocalPlayer, InterfaceResource.ThoriumGaugeOffset);
-            InterfaceResource.IncreaseThoriumGaugeOffset(TwoPathsGauge.StackHeight);
+            InterfaceResource.IncreaseThoriumGaugeOffset(TwoPathsGauge.stackHeight);
             return true;
+        }
+    }
+
+    // - 左端蝠翼和暗槽，右端天使羽翼和光槽，中间是平衡节点。暗能量从左端、光能量从右端向中间节点填充。
+    // - 新增的那一段白闪；一端充满时这一端的端饰点亮、闪光并播提示音。
+    // - 进入和退出平衡时节点爆闪（两半镰刀合一的动画在人物身上播放，见 TwoPathsBalanceSpin）。
+    // - 平衡期间两半透出呼吸光，顶边火星向节点流动，剩余能量贴着节点向中间收拢。
+    // - 手持这把武器时淡入，切走后淡出。
+    //只在本地客户端更新和绘制：TwoPathsSystem 每帧调用 Update，在界面层里调用Draw，数据全部读自 TwoPathsPlayer
+    public static class TwoPathsGauge
+    {
+        // 在瑟银计量条栈里占的高度，画完后栈往下推这么多。
+        public const int stackHeight = 30;
+
+        private const string TexturePath = "InfernalEclipseWeaponsDLC/Assets/Textures/TwoPathsGauge/";
+        // 能量条中心离玩家脚底的距离（像素）。
+        private const float playerGap = 20f;
+
+        //每一边的能量槽：长 36、宽 8，顶边在 y = 12。暗槽从 x = 12 往右，光槽到 x = 108 为止。
+        private const int fillLength = 35;
+        //通用最高顶点，由于贴图从左上角（0,0）开始，向右下逐渐增加
+        private const int fillTop = 3;
+        private const int fillHeight = 8;
+
+        //起始槽位顶点，由于贴图缩放问题，需要进入游戏内实际观察进行微调
+        private const int darkFillLeft = 3;
+        private const int lightFillRight = 97;
+
+        //淡出淡入、闪光时间，固定值
+        private const int fadeInTime = 10;
+        private const int fadeOutTime = 40;
+        private const int flashTime = 12;
+        // 0~1 的整体透明度，手持时淡入、切走时淡出。
+        private static float visibility;
+        //用于游戏内帧更新
+        private static int ticks;
+        // 上一帧的状态，用来检测“刚刚充满”“刚刚进入/退出平衡”“刚刚涨了一段”。
+        private static bool wasBalance;
+        private static bool wasDarkFull;
+        private static bool wasLightFull;
+        // 各种闪光的剩余 tick。
+        private static int balanceFlash;
+        private static int darkCapFlash;
+        private static int lightCapFlash;
+        private static float lastDark;
+        private static float lastLight;
+        //涨能量前的数值，白闪从这里画到当前值。
+        private static float darkGainFrom;
+        private static float lightGainFrom;
+        private static int darkGainFlash;
+        private static int lightGainFlash;
+
+        public static bool Visible => visibility > 0f;
+
+        // 每帧更新一次（TwoPathsSystem.PostUpdateEverything）：淡入淡出、检测状态变化、倒数闪光。
+        public static void Update()
+        {
+            Player player = Main.LocalPlayer;
+            TwoPathsPlayer modPlayer = player.GetModPlayer<TwoPathsPlayer>();
+
+            //是否显示能量槽
+            bool shown = modPlayer.HoldingTwoPaths && !player.dead && !player.ghost;
+
+            //fadeInTime 淡入 10帧，fadeOutTime tick 淡出 40帧
+            visibility = shown ? MathF.Min(visibility + 1f / fadeInTime, 1f) : MathF.Max(visibility - 1f / fadeOutTime, 0f);
+
+            //每帧增加
+            ticks++;
+
+            // 进入或退出平衡：节点爆闪。
+            if (modPlayer.Balance != wasBalance)
+            {
+                wasBalance = modPlayer.Balance;
+                balanceFlash = flashTime;
+            }
+
+            // 一端刚充满：端饰闪光并播提示音（暗端音调低、光端音调高）。进入平衡那一下改由节点爆闪表现。
+            bool darkFull = modPlayer.Dark >= TwoPathsPlayer.MaxEnergy;
+            bool lightFull = modPlayer.Light >= TwoPathsPlayer.MaxEnergy;
+
+            if (darkFull && !wasDarkFull && !modPlayer.Balance)
+            {
+                darkCapFlash = flashTime;
+                if (shown)
+                    SoundEngine.PlaySound(SoundID.MaxMana with { Pitch = -0.4f });
+            }
+
+            if (lightFull && !wasLightFull && !modPlayer.Balance)
+            {
+                lightCapFlash = flashTime;
+                if (shown)
+                    SoundEngine.PlaySound(SoundID.MaxMana with { Pitch = 0.2f });
+            }
+
+            wasDarkFull = darkFull;
+            wasLightFull = lightFull;
+
+            //能量条增长时的白闪（平衡期间不充能，不会触发）
+            if (modPlayer.Dark > lastDark + 0.5f && !modPlayer.Balance)
+            {
+                darkGainFrom = lastDark;
+                darkGainFlash = flashTime;
+            }
+            if (modPlayer.Light > lastLight + 0.5f && !modPlayer.Balance)
+            {
+                lightGainFrom = lastLight;
+                lightGainFlash = flashTime;
+            }
+
+            lastDark = modPlayer.Dark;
+            lastLight = modPlayer.Light;
+
+            //每帧减少光照时长
+            darkCapFlash = Math.Max(darkCapFlash - 1, 0);
+            lightCapFlash = Math.Max(lightCapFlash - 1, 0);
+            darkGainFlash = Math.Max(darkGainFlash - 1, 0);
+            lightGainFlash = Math.Max(lightGainFlash - 1, 0);
+            balanceFlash = Math.Max(balanceFlash - 1, 0);
+        }
+
+        // 绘制顺序：平衡呼吸光 → 框体 → 能量槽 → 端饰 → 节点 → 节点爆闪。
+        // stackOffset 是瑟银计量条栈当前的偏移（多条计量条上下叠放用）；录制工具调用时传 0。
+        public static void Draw(Player player, float stackOffset)
+        {
+            if (visibility <= 0f)
+                return;
+
+            TwoPathsPlayer modPlayer = player.GetModPlayer<TwoPathsPlayer>();
+            SpriteBatch spriteBatch = Main.spriteBatch;
+
+            // 能量条中心在脚底下方 playerGap 处，取整到像素，像素画才不会糊。
+            Vector2 topLeft = (player.Bottom + new Vector2(0f, playerGap + stackOffset) - Main.screenPosition - Texture("Frame").Size() * 0.5f).Floor();
+            Vector2 nodePosition = topLeft + Texture("Frame").Size() * 0.5f + new Vector2(0, 8f); //下移一段距离
+
+            float alpha = visibility;
+            bool balance = modPlayer.Balance;
+            bool darkFull = modPlayer.Dark >= TwoPathsPlayer.MaxEnergy;
+            bool lightFull = modPlayer.Light >= TwoPathsPlayer.MaxEnergy;
+            float breath = 0.5f + 0.5f * MathF.Sin(ticks * 0.15f);
+
+            //平衡呼吸光
+            if (balance)
+            {
+                //暗 紫光
+                //光 金光
+                //这里需要手动计算发光位置
+
+                Vector2 darkBalanceLight = new Vector2(19, 6);
+                Vector2 lightBalanceLight = new Vector2(80, 6);
+
+                DrawFlowerGlow(topLeft + darkBalanceLight, new Vector2(1.1f, 0.8f), TwoPathsHelper.Additive(TwoPathsHelper.DarkViolet, (0.25f + 0.2f * breath) * alpha));
+                DrawFlowerGlow(topLeft + lightBalanceLight, new Vector2(1.1f, 0.8f), TwoPathsHelper.Additive(TwoPathsHelper.LightGold, (0.25f + 0.2f * breath) * alpha) , true);
+            }
+
+            //能量槽 + 能量条
+            spriteBatch.Draw(Texture("Frame"), topLeft, Color.White * alpha);
+            DrawFills(modPlayer, topLeft, alpha, balance, darkFull, lightFull);
+
+
+            //左右翼，由于为单独图，跟能量槽位置需单独计算
+            Texture2D darkWings = Texture("DarkWings"); //帧图 单帧宽20 长28
+            Texture2D lightWings = Texture("LightWings"); //帧图 单帧宽26 长26
+
+            Rectangle darkFrame = darkWings.Frame(1, 2, 0, darkFull || balance ? 1 : 0);
+            Rectangle lightFrame = lightWings.Frame(1, 2, 0, lightFull || balance ? 1 : 0);
+
+            Vector2 darkPosition = darkFull || balance ? new Vector2(-15, -11) : new Vector2(-11, -3);
+            Vector2 lightPosition = lightFull || balance ? new Vector2(-5,-8) :  new Vector2(-8, -4);
+
+            spriteBatch.Draw(
+                darkWings,
+                topLeft + darkPosition, //左上角位置微调
+                darkFrame,
+                Color.White * alpha
+                );
+            spriteBatch.Draw(
+                lightWings,
+                topLeft + new Vector2( Texture("Frame").Size().X ,0) + lightPosition, //右上角位置微调
+                lightFrame,
+                Color.White * alpha
+                );
+
+            if (darkCapFlash > 0)
+                DrawGlow(topLeft + new Vector2(9f, 14f), new Vector2(0.8f), TwoPathsHelper.Additive(TwoPathsHelper.DarkCrimson, darkCapFlash / (float)flashTime * alpha));
+            if (lightCapFlash > 0)
+                DrawGlow(topLeft + new Vector2(111f, 14f), new Vector2(0.8f), TwoPathsHelper.Additive(TwoPathsHelper.LightGold, lightCapFlash / (float)flashTime * alpha));
+
+            //Node.png 横排 8 帧：0 普通、1 光端满、2 暗端满、3~6 平衡呼吸（每帧 8 tick 循环）、7 白闪
+            //进入或退出平衡后的前 4 tick 显示白闪帧
+            int frame = balance ? 3 + ticks / 8 % 4 : lightFull ? 1 : darkFull ? 2 : 0;
+            if (balanceFlash > flashTime - 4)
+                frame = 7;
+
+            //前2参数为帧图有几列几行，后2参数为取第几列几行的帧图，默认从0开始
+            Rectangle nodeFrame = Texture("Node").Frame(8, 1, frame, 0);
+            Vector2 nodeOrigin = nodeFrame.Size() * 0.5f;
+            spriteBatch.Draw(
+                Texture("Node"),
+                nodePosition, //下移一段距离
+                nodeFrame,
+                Color.White * alpha,
+                0f,
+                nodeOrigin,
+                1f,
+                SpriteEffects.None,
+                0f);
+
+            if (balanceFlash > 0)
+                DrawBurst(nodePosition, balanceFlash / (float)flashTime, alpha);
+        }
+
+        //两边的能量槽
+        //FillDark.png / FillLight.png 上下两行：第 1 行是普通状态，第 2 行是充满或平衡时更亮的版本
+        //根据能量槽 8 格高，故
+        private static void DrawFills(TwoPathsPlayer modPlayer, Vector2 topLeft, float alpha, bool balance, bool darkFull, bool lightFull)
+        {
+            SpriteBatch spriteBatch = Main.spriteBatch;
+            //计算玩家实际能量比值，用于能量条绘制
+            int darkWidth = (int)MathF.Round(fillLength * MathHelper.Clamp(modPlayer.Dark / TwoPathsPlayer.MaxEnergy, 0f, 1f));
+            int lightWidth = (int)MathF.Round(fillLength * MathHelper.Clamp(modPlayer.Light / TwoPathsPlayer.MaxEnergy, 0f, 1f));
+
+            //正常从外向里绘制，平衡后从里向外减少
+            //不再使用动态纹理
+            int darkLeft = balance ? darkFillLeft + fillLength - darkWidth : darkFillLeft;
+            int lightLeft = balance ? lightFillRight - fillLength : lightFillRight - lightWidth;
+
+            if (darkWidth > 0)
+            {
+                spriteBatch.Draw(
+                    Texture("FillDark"), 
+                    topLeft + new Vector2(darkLeft, fillTop), 
+                    new Rectangle(0, darkFull || balance ? fillHeight : 0, darkWidth, fillHeight),  //截取绘制段落
+                    Color.White * alpha);
+            }
+            if (lightWidth > 0)
+            {
+                spriteBatch.Draw(
+                    Texture("FillLight"), 
+                    topLeft + new Vector2(lightLeft, fillTop), 
+                    new Rectangle(0, lightFull || balance ? fillHeight : 0, lightWidth, fillHeight), 
+                    Color.White * alpha);
+            }
+
+            //宽1，长1000的白色像素帧图
+            Texture2D pixel = TextureAssets.MagicPixel.Value;
+
+            //能量增涨时，消失的白光
+            if (darkGainFlash > 0)
+            {
+                int from = (int)MathF.Round(fillLength * MathHelper.Clamp(darkGainFrom / TwoPathsPlayer.MaxEnergy, 0f, 1f));
+                if (darkWidth > from)
+                    spriteBatch.Draw(
+                        pixel, 
+                        new Rectangle((int)topLeft.X + darkFillLeft + from, (int)topLeft.Y + fillTop, darkWidth - from, fillHeight), //此为destinationRectangle，即为最终要绘制的对象，而非截取MagicPixel
+                        TwoPathsHelper.Additive(Color.White, 0.8f * darkGainFlash / flashTime * alpha));
+            }
+            if (lightGainFlash > 0)
+            {
+                int from = (int)MathF.Round(fillLength * MathHelper.Clamp(lightGainFrom / TwoPathsPlayer.MaxEnergy, 0f, 1f));
+                if (lightWidth > from)
+                    spriteBatch.Draw(pixel, new Rectangle((int)topLeft.X + lightFillRight - lightWidth, (int)topLeft.Y + fillTop, lightWidth - from, fillHeight), TwoPathsHelper.Additive(Color.White, 0.8f * lightGainFlash / flashTime * alpha));
+            }
+
+            //能量前沿的亮点（没满时才画）。Front.png 里：x 2 是暗端亮边、x 3 是它的光晕，x 4 是光端光晕、x 5 是光端亮边
+            if (balance)
+                return;
+
+            Texture2D front = Texture("Front");
+            if (darkWidth > 0 && darkWidth < fillLength)
+                spriteBatch.Draw(front, topLeft + new Vector2(darkFillLeft + darkWidth - 1, fillTop), new Rectangle(2, 0, 2, fillHeight), Color.White * alpha);
+
+            if (lightWidth > 0 && lightWidth < fillLength)
+                spriteBatch.Draw(front, topLeft + new Vector2(lightFillRight - lightWidth - 1, fillTop), new Rectangle(4, 0, 2, fillHeight), Color.White * alpha);
+        }
+
+        //节点爆闪：flash 从 1 降到 0。一团白光、一个四芒星（白色十字加金紫两色的斜十字），再加一圈向外扩散的金紫火星。
+        private static void DrawBurst(Vector2 position, float flash, float alpha)
+        {
+            SpriteBatch spriteBatch = Main.spriteBatch;
+            DrawGlow(position, new Vector2(0.35f + 0.55f * (1f - flash)), TwoPathsHelper.Additive(Color.White, 0.55f * flash * alpha));
+
+            // Extra_98 是原版的一根细长光线贴图，拉伸后当星芒用。
+            Texture2D ray = ModContent.Request<Texture2D>("Terraria/Images/Extra_98").Value;
+            Vector2 rayScale = new(0.35f, 90f / ray.Height * (0.5f + 0.5f * flash));
+            for (int i = 0; i < 2; i++)
+                spriteBatch.Draw(ray, position, null, TwoPathsHelper.Additive(Color.White, flash * alpha), MathHelper.PiOver2 * i, ray.Size() / 2f, rayScale, SpriteEffects.None, 0f);
+            for (int i = 0; i < 2; i++)
+                spriteBatch.Draw(ray, position, null, TwoPathsHelper.Additive(i == 0 ? TwoPathsHelper.LightGold : TwoPathsHelper.DarkViolet, flash * alpha), MathHelper.PiOver4 + MathHelper.PiOver2 * i, ray.Size() / 2f, rayScale * 0.6f, SpriteEffects.None, 0f);
+
+            Texture2D pixel = TextureAssets.MagicPixel.Value;
+            for (int i = 0; i < 16; i++)
+            {
+                Vector2 newPosition = position + (MathHelper.TwoPi * i / 16f + 0.2f).ToRotationVector2() * (4f + 38f * (1f - flash));
+                Color color = i % 2 == 0 ? TwoPathsHelper.LightGold : TwoPathsHelper.DarkViolet;
+                spriteBatch.Draw(pixel, new Rectangle((int)newPosition.X - 1, (int)newPosition.Y - 1, 2, 2), color * (flash * alpha));
+            }
+        }
+
+        //以 Glow.png（一团柔和光斑）为中心画一个光晕。
+        private static void DrawGlow(Vector2 position, Vector2 scale, Color color )
+        {
+            Texture2D glow = Texture("Glow");
+            Main.spriteBatch.Draw(
+                glow, 
+                position, 
+                null, 
+                color, 
+                0f, 
+                glow.Size() * 0.5f, 
+                scale, 
+                SpriteEffects.None, 0f);
+        }
+
+        //Flower为中心画一个光晕，随时间缩放转动
+        private static void DrawFlowerGlow(Vector2 position, Vector2 scale, Color color, bool reverseRotation = false)
+        {
+            Texture2D glow = Texture("Flower");
+            Vector2 realScale = scale * ( 1 + 0.25f * MathF.Sin(ticks * 0.15f));
+            float rotation = MathHelper.ToRadians(1.5f * ticks);
+            rotation = reverseRotation ? -rotation : rotation;
+            Main.spriteBatch.Draw(
+                glow,
+                position,
+                null,
+                color,
+                rotation,
+                glow.Size() * 0.5f,
+                realScale,
+                SpriteEffects.None, 0f);
+        }
+
+        private static Texture2D Texture(string name) => ModContent.Request<Texture2D>(TexturePath + name).Value;
+    }
+
+    // 刀光拖影横截面上的一个颜色节点：Radius 是到圆心的距离占攻击距离的比例（0 是手，1 是刀尖），
+    // Color 是预乘颜色（普通混合的节点照常写，叠加混合的节点 A = 0，见 TwoPathsHelper.Additive）。
+    public readonly record struct TrailStop(float Radius, Color Color);
+
+    // 【神冥歧径的公用工具】几个攻击弹幕、平时手持、能量条都会用到：
+    // - 贴图路径。
+    // - 握点几何：在 TwoPaths.png 上量出的两端刀颈位置，由此算出杆身中点、每一半的握点、刀身朝向和攻击距离。
+    // - 统一尺寸 SwingScale：所有攻击和平时手持都按这个大小画。
+    // - 配色、拖影的分层配方，以及画刀光拖影的 DrawSwingTrail。
+    // - 画半把镰刀（DrawScythe）、整把镰刀（DrawFullScythe）、手持帧（HeldFrameDrawData）。
+    // - 命中报能量（Credit）和限流的命中音（PlayImpactSound）。
+    public static class TwoPathsHelper
+    {
+        // 整把镰刀（攻击弹幕和合一开场用），以及光端、暗端两半。两半和整把在同一张 208×190 的画布上，叠在一起就是整把。
+        public const string TexturePath = "InfernalEclipseWeaponsDLC/Content/Items/Weapons/Healer/Melee/Scythes/TwoPaths";
+        public const string LightHalfPath = "InfernalEclipseWeaponsDLC/Content/Projectiles/HealerPro/Scythes/TwoPathsHalfLight";
+        public const string DarkHalfPath = "InfernalEclipseWeaponsDLC/Content/Projectiles/HealerPro/Scythes/TwoPathsHalfDark";
+        // 左键的大虚影：暗端刀头加一小截杆，杆往手的方向渐隐，画在暗端那一半的画布上（所以握点、角度和暗端那一半通用）。
+        public const string PhantomDarkPath = "InfernalEclipseWeaponsDLC/Content/Projectiles/HealerPro/Scythes/TwoPathsPhantomDark";
+
+        // 在 TwoPaths.png（208×190）上量出的两端刀颈（刀刃和杆身相接处）的贴图坐标。
+        // 每一半都保留整根杆，在被去掉的另一端刀颈前 7 像素处收尾，并带一个柄头
+        // 重画两半贴图时如果改了柄尾位置，要同步改 HandleEndBeforeNeck 和 GripFromHandleEnd。
+        private static readonly Vector2 LightNeck = new(62f, 48f);
+        private static readonly Vector2 DarkNeck = new(150f, 133f);
+        private const float HandleEndBeforeNeck = 7f;
+        private const float GripFromHandleEnd = 10f;
+
+        // 从半把镰刀的握点到刀尖的距离（贴图像素，1 倍尺寸时）。判定、拖影、火花的长度都以它为基准。
+        public const float BladeReach = 150f;
+        // 所有攻击和平时手持都按这个尺寸画（再乘物品的近战尺寸加成），切换攻击时镰刀不会变大变小。
+        public const float SwingScale = 1.2f;
+        // 拖影相邻两个采样点之间的最大角度（弧度），超过就插值补点，保证弧线圆滑。
+        private const float TrailMaxStep = 0.09f;
+        // 两次命中音之间至少隔多少 tick。
+        private const uint ImpactSoundplayerGap = 12;
+
+        private static uint lastImpactSound;
+
+        // 画拖影用的着色器（顶点颜色），第一次用时创建，卸载时释放。
+        private static BasicEffect trailEffect;
+
+        // 由刀颈坐标推出的几何量：杆身中点、从暗端指向光端的单位向量、每一半握点离中点多远、
+        // 两半各自的握点（光端那一半握在靠暗端的柄尾附近，暗端那一半反过来）、刀身在贴图里的朝向角。
+        private static readonly Vector2 Middle = (LightNeck + DarkNeck) / 2f;
+        private static readonly Vector2 LightDirection = Vector2.Normalize(LightNeck - DarkNeck);
+        private static readonly float GripFromMiddle = Vector2.Distance(LightNeck, DarkNeck) / 2f - HandleEndBeforeNeck - GripFromHandleEnd;
+        private static readonly Vector2 LightGrip = Middle - LightDirection * GripFromMiddle;
+        private static readonly Vector2 DarkGrip = Middle + LightDirection * GripFromMiddle;
+        private static readonly float LightAxis = LightDirection.ToRotation();
+        private static readonly float DarkAxis = (-LightDirection).ToRotation();
+
+        // 整把镰刀握在杆身中点时，从中点到任一端刀尖的距离（1 倍尺寸）。平衡旋转用。
+        public static readonly float FullReach = BladeReach - GripFromMiddle;
+
+        // 主题色：光端金色、暗端深红、暗能量紫色。能量条、裂隙、拖影等共用。
+        public static readonly Color LightGold = new(255, 210, 110);
+        public static readonly Color DarkCrimson = new(200, 20, 40);
+        public static readonly Color DarkViolet = new(178, 102, 255);
+        private static readonly Color DarkTrailTint = new(150, 0, 26);
+        // 光的命中音是清脆的水晶声；暗的命中音用火焰爆裂声（写在各个暗攻击弹幕里）。
+        public static readonly SoundStyle LightImpactSound = SoundID.DD2_CrystalCartImpact with { Pitch = 0.2f, Volume = 0.6f, PitchVariance = 0.15f };
+        // 拖影外缘那条实线的颜色。
+        private static readonly Color DarkRim = new(170, 0, 30);
+        private static readonly Color LightRim = new(225, 150, 40);
+
+        // 拖影的分层配方，给 DrawSwingTrail 用。每一层是一组从内到外的颜色节点，按顺序叠画。
+        // 暗：① 普通混合的主体（靠手处透明，中段黑红，往外缘变成深红）；② 外缘一条实心红线；③ 外缘的叠加红光。
+        // 外缘红线先用普通混合画，所以在亮背景上仍是红色；只用叠加混合的话，红色在亮背景上会变成肉色。
+        public static readonly TrailStop[][] DarkTrail =
+        {
+            new TrailStop[]
+            {
+                new(0.25f, Color.Transparent),
+                new(0.5f, Shaded(DarkTrailTint, 0.25f, 0.57f)),
+                new(0.75f, Shaded(DarkTrailTint, 0.6f, 1f)),
+                new(0.95f, Shaded(DarkTrailTint, 1f, 1f)),
+                new(1f, Color.Transparent),
+            },
+            new TrailStop[] { new(0.905f, Color.Transparent), new(0.95f, DarkRim), new(0.995f, Color.Transparent) },
+            new TrailStop[] { new(0.905f, Color.Transparent), new(0.95f, Additive(DarkCrimson, 0.7f)), new(0.995f, Color.Transparent) },
+        };
+
+        // 光：① 半透明的金色主体；② 越往外越亮的叠加金光；③ 外缘一条实心金线；④ 外缘的白热细芯。
+        // 普通混合的几层保证在亮背景上也看得清，只靠叠加的金色在亮背景上会被冲淡。
+        public static readonly TrailStop[][] LightTrail =
+        {
+            new TrailStop[]
+            {
+                new(0.25f, Color.Transparent),
+                new(0.5f, Shaded(LightGold, 1f, 0.23f)),
+                new(0.75f, Shaded(LightGold, 1f, 0.4f)),
+                new(0.95f, Shaded(LightGold, 1f, 0.4f)),
+                new(1f, Color.Transparent),
+            },
+            new TrailStop[]
+            {
+                new(0.25f, Color.Transparent),
+                new(0.5f, Additive(LightGold, 0.08f)),
+                new(0.75f, Additive(LightGold, 0.33f)),
+                new(0.95f, Additive(LightGold, 0.55f)),
+                new(1f, Color.Transparent),
+            },
+            new TrailStop[] { new(0.905f, Color.Transparent), new(0.95f, LightRim), new(0.995f, Color.Transparent) },
+            new TrailStop[] { new(0.905f, Color.Transparent), new(0.95f, Additive(Color.White, 0.8f)), new(0.995f, Color.Transparent) },
+        };
+
+        // 叠加混合的颜色：在原版默认的预乘普通混合下，把 A 设成 0 就等于叠加发光。opacity 是亮度。
+        public static Color Additive(Color color, float opacity = 1f)
+        {
+            color *= opacity;
+            color.A = 0;
+            return color;
+        }
+
+        // 普通混合拖影节点用的预乘颜色：tint 按 shade 压暗，不透明度为 alpha。
+        public static Color Shaded(Color tint, float shade, float alpha) => new(new Vector4(tint.ToVector3() * shade * alpha, alpha));
+
+        // 画一条刀光拖影：以 center 为圆心、半径 reach 的一段扇环，沿着刀身最近经过的角度（angles，新的在前，共 count 个）铺开。
+        // - 拖影最多拖到刀身后方 maxAngle（弧度）处，越往后越淡，同时越旧越淡；所以它只覆盖刀真正扫过的地方，
+        //   刀停下后会自己缩回刀身。
+        // - opacity 是整体不透明度。layers 是分层配方（DarkTrail / LightTrail），每层按 TrailStop 在半径方向上铺颜色，按顺序叠画。
+        // - 实现上是用顶点颜色画三角形网格，所以中途会结束 SpriteBatch，画完再按原版弹幕绘制的默认参数重新开始；
+        //   只能在弹幕 PreDraw 这类默认绘制状态下调用。
+        public static void DrawSwingTrail(Vector2 center, float[] angles, int count, float reach, float maxAngle, float opacity, params TrailStop[][] layers)
+        {
+            if (count < 2 || opacity <= 0f)
+                return;
+
+            // 补点：爆发时刀一 tick 能转约 48°，相邻两次记录之间插值补点，弧线才圆。
+            // 同时算每个采样点的淡出系数 =（离刀身的角距离衰减）×（时间上的新旧衰减），到 maxAngle 处截断。
+            List<float> sampleAngles = new();
+            List<float> sampleFade = new();
+            float travelled = 0f;
+            bool capped = false;
+            for (int i = 0; i < count - 1 && !capped; i++)
+            {
+                float span = angles[i + 1] - angles[i];
+                float length = MathF.Abs(span);
+                int steps = Math.Clamp((int)MathF.Ceiling(length / TrailMaxStep), 1, 16);
+                for (int s = 0; s < steps; s++)
+                {
+                    float t = s / (float)steps;
+                    float distance = travelled + length * t;
+                    if (distance >= maxAngle)
+                        break;
+                    sampleAngles.Add(angles[i] + span * t);
+                    sampleFade.Add(MathF.Pow(1f - distance / maxAngle, 1.5f) * (1f - (i + t) / (count - 1)));
+                }
+                if (travelled + length >= maxAngle)
+                {
+                    sampleAngles.Add(angles[i] + MathF.Sign(span) * (maxAngle - travelled));
+                    sampleFade.Add(0f);
+                    capped = true;
+                }
+                travelled += length;
+            }
+            if (!capped)
+            {
+                sampleAngles.Add(angles[count - 1]);
+                sampleFade.Add(0f);
+            }
+
+            // 设置着色器：世界坐标经过游戏的缩放矩阵，再投影到屏幕。
+            GraphicsDevice device = Main.instance.GraphicsDevice;
+            trailEffect ??= new BasicEffect(device) { VertexColorEnabled = true };
+            trailEffect.World = Matrix.Identity;
+            trailEffect.View = Main.GameViewMatrix.TransformationMatrix;
+            trailEffect.Projection = Matrix.CreateOrthographicOffCenter(0f, Main.screenWidth, Main.screenHeight, 0f, -1f, 1f);
+
+            Main.spriteBatch.End();
+            device.BlendState = BlendState.AlphaBlend;
+            device.RasterizerState = RasterizerState.CullNone;
+            device.DepthStencilState = DepthStencilState.None;
+            trailEffect.CurrentTechnique.Passes[0].Apply();
+
+            // 每一层建一张网格：沿角度方向是 samples 个采样点，沿半径方向是这一层的节点数（rings），相邻四个顶点组成两个三角形。
+            Vector2 origin = center - Main.screenPosition;
+            int samples = sampleAngles.Count;
+            foreach (TrailStop[] stops in layers)
+            {
+                int rings = stops.Length;
+                var vertices = new VertexPositionColor[samples * rings];
+                for (int k = 0; k < samples; k++)
+                {
+                    Vector2 direction = sampleAngles[k].ToRotationVector2();
+                    for (int j = 0; j < rings; j++)
+                        vertices[k * rings + j] = new VertexPositionColor(new Vector3(origin + direction * stops[j].Radius * reach, 0f), stops[j].Color * (sampleFade[k] * opacity));
+                }
+
+                var indices = new short[(samples - 1) * (rings - 1) * 6];
+                int n = 0;
+                for (int k = 0; k < samples - 1; k++)
+                {
+                    for (int j = 0; j < rings - 1; j++)
+                    {
+                        short a = (short)(k * rings + j);
+                        short c = (short)(a + rings);
+                        indices[n++] = a;
+                        indices[n++] = (short)(a + 1);
+                        indices[n++] = c;
+                        indices[n++] = (short)(a + 1);
+                        indices[n++] = (short)(c + 1);
+                        indices[n++] = c;
+                    }
+                }
+                device.DrawUserIndexedPrimitives(PrimitiveType.TriangleList, vertices, 0, vertices.Length, indices, 0, indices.Length / 3);
+            }
+
+            Main.spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend, Main.DefaultSamplerState, DepthStencilState.None, Main.Rasterizer, null, Main.GameViewMatrix.TransformationMatrix);
+        }
+
+        // 卸载模组时释放着色器（图形资源必须在主线程释放）。由 TwoPathsSystem.Unload 调用。
+        public static void Unload()
+        {
+            BasicEffect effect = trailEffect;
+            trailEffect = null;
+            if (effect != null)
+                Main.QueueMainThreadAction(effect.Dispose);
+        }
+
+        // 画半把镰刀：挥砍时只画出手的那一端（activeEnd），握点放在 gripWorld，刀身指向 bladeRotation。
+        // 往回挥（角度在减小）时传 mirror = true，贴图竖直镜像，让弯刃的一侧始终在前。
+        // texturePath 可以换成另一张按同一半的画布排版的贴图（比如左键虚影 PhantomDarkPath）。
+        public static void DrawScythe(Vector2 gripWorld, float bladeRotation, TwoPathsSide activeEnd, bool mirror, float scale, Color color, string texturePath = null)
+        {
+            bool light = activeEnd == TwoPathsSide.Light;
+            Texture2D texture = ModContent.Request<Texture2D>(texturePath ?? (light ? LightHalfPath : DarkHalfPath)).Value;
+            Vector2 origin = light ? LightGrip : DarkGrip;
+            float axis = light ? LightAxis : DarkAxis;
+            SpriteEffects effects = SpriteEffects.None;
+            if (mirror)
+            {
+                origin.Y = texture.Height - origin.Y;
+                axis = -axis;
+                effects = SpriteEffects.FlipVertically;
+            }
+
+            // 旋转 = 目标朝向 - 刀身在贴图里本来的朝向。
+            Main.EntitySpriteDraw(texture, gripWorld - Main.screenPosition, null, color, bladeRotation - axis, origin, scale, effects, 0f);
+        }
+
+        // 画整把双头镰：握在杆身中点（middleWorld），光刃指向 lightRotation。
+        // 两半和整把共用 TwoPaths.png 的画布，所以 texturePath 传某一半时，就只在同一位置画出那一半（合一开场就是这样用的）。
+        public static void DrawFullScythe(Vector2 middleWorld, float lightRotation, float scale, Color color, string texturePath = TexturePath)
+        {
+            Texture2D texture = ModContent.Request<Texture2D>(texturePath).Value;
+            Main.EntitySpriteDraw(texture, middleWorld - Main.screenPosition, null, color, lightRotation - LightAxis, Middle, scale, SpriteEffects.None, 0f);
+        }
+
+        // 平时手持用：物品动态贴图里的一帧（排版和 TwoPaths.png 一样），握点在杆身中点往暗端 gripTowardDark 个贴图像素处，
+        // 光刃指向 lightRotation。flip 是角色朝左时水平镜像。返回给玩家绘制层用的 DrawData。
+        public static DrawData HeldFrameDrawData(Texture2D texture, Rectangle frame, Vector2 screenPosition, float lightRotation, float gripTowardDark, float scale, Color color, bool flip)
+        {
+            Vector2 origin = Middle - LightDirection * gripTowardDark;
+            float axis = LightAxis;
+            SpriteEffects effects = SpriteEffects.None;
+            if (flip)
+            {
+                origin.X = frame.Width - origin.X;
+                axis = MathHelper.Pi - LightAxis;
+                effects = SpriteEffects.FlipHorizontally;
+            }
+            return new DrawData(texture, screenPosition, frame, color, lightRotation - axis, origin, scale, effects, 0f);
+        }
+
+        //弹幕命中能量条增加，仅弹幕主人在客户端执行
+        public static void Credit(Projectile projectile, TwoPathsSide side, int attackId)
+        {
+            if (projectile.owner == Main.myPlayer)
+                Main.player[projectile.owner].GetModPlayer<TwoPathsPlayer>().CreditHit(side, attackId);
+        }
+
+        // 命中音：只由弹幕主人播放，并且至少隔 ImpactSoundplayerGap tick 才响一次，
+        // 免得一刀打中一群敌人、或者平衡旋转连续命中时，声音叠成一片噪音。
+        public static void PlayImpactSound(Projectile projectile, in SoundStyle style, Vector2 position)
+        {
+            if (projectile.owner != Main.myPlayer || Main.GameUpdateCount - lastImpactSound < ImpactSoundplayerGap)
+                return;
+            lastImpactSound = Main.GameUpdateCount;
+            SoundEngine.PlaySound(style, position);
         }
     }
 }

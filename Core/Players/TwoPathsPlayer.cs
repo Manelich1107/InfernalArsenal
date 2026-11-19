@@ -9,7 +9,7 @@ using Terraria.ModLoader;
 
 namespace InfernalEclipseWeaponsDLC.Core.Players
 {
-    // 光暗两端。左键（暗攻击）是 Dark，右键（光攻击）是 Light。
+    //左暗属性，右光属性
     public enum TwoPathsSide
     {
         Dark,
@@ -186,11 +186,11 @@ namespace InfernalEclipseWeaponsDLC.Core.Players
                 dust.scale = Main.rand.NextFloat(0.9f, 1.8f);
             }
 
-            // 震屏用灾厄提供的 Player.SetScreenshake 扩展方法。
+            //使用灾厄自己封装的屏幕震动方法
             Player.SetScreenshake(2.5f);
         }
 
-        // 死亡时清空能量并退出平衡。
+        //死亡时全部清空
         public override void UpdateDead()
         {
             Dark = 0f;

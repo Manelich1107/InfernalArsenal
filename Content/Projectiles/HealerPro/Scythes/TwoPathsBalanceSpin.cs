@@ -9,6 +9,7 @@ using Terraria.Graphics.CameraModifiers;
 using Terraria.ID;
 using Terraria.ModLoader;
 using ThoriumMod.Projectiles.Scythe;
+using InfernalEclipseWeaponsDLC.Core;
 
 namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
 {
