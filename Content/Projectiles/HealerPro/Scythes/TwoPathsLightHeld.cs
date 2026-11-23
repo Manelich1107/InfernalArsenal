@@ -12,6 +12,7 @@ using Terraria.GameContent;
 using Terraria.ID;
 using Terraria.ModLoader;
 using ThoriumMod.Projectiles.Scythe;
+using static ThoriumMod.Tiles.Statues;
 
 namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
 {
@@ -56,6 +57,9 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
         private float Progress => Timer / MaxTime;
         //爆发结束的位置（挥砍阶段的比例）。X 字终结要多抡一圈，爆发更长
         private float BurstEnd => shouldSpin ? 0.72f : 0.55f;
+
+        //所有弹幕共享音效触发，避免打群怪声音叠加
+        private static uint lastSoundTriger;
 
         public ref Player Player => ref Main.player[Projectile.owner];
 
@@ -226,9 +230,17 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
 
         public override void SafeOnHitNPC(NPC target, NPC.HitInfo hit, int damageDone)
         {
-            // 充光能量（同一刀只算一次），播放命中音（有限流）。
-            TwoPathsHelper.Credit(Projectile, TwoPathsSide.Light, attackId);
-            TwoPathsHelper.PlayImpactSound(Projectile, TwoPathsHelper.LightImpactSound, target.Center);
+            if (Main.myPlayer == Projectile.owner) 
+            {
+                Player.GetModPlayer<TwoPathsPlayer>().CreditHit(TwoPathsSide.Light, attackId);
+
+                //实际效果不佳
+                if (Main.GameUpdateCount - lastSoundTriger < 20)
+                    return;
+
+                lastSoundTriger = Main.GameUpdateCount;
+                SoundEngine.PlaySound(SoundID.DD2_CrystalCartImpact with { Pitch = 0.2f, Volume = 0.6f, PitchVariance = 0.15f }, target.Center);
+            }
         }
 
         //多人同步，由于Projectile.netUpdate = true，实际只能传出ai[0]到ai[2]的参数
