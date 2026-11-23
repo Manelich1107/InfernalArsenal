@@ -2,11 +2,13 @@
 using InfernalEclipseWeaponsDLC.Core;
 using InfernalEclipseWeaponsDLC.Core.Players;
 using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
 using System;
 using System.IO;
 using Terraria;
 using Terraria.Audio;
 using Terraria.DataStructures;
+using Terraria.GameContent;
 using Terraria.ID;
 using Terraria.ModLoader;
 using ThoriumMod.Projectiles.Scythe;
@@ -32,7 +34,7 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
         private const int GhostCount = 4;
         // 拖影最长拖到刀身后方约 130°（2.3 弧度）处完全消失。
         private const float TrailAngle = 2.3f;
-        // 硬停占挥砍阶段的 7%；之后拖影再用 25% 缩回刀身并淡出。
+        //硬停占挥砍阶段的 7%；之后拖影再用 25% 缩回刀身并淡出。
         private const float StopTime = 0.07f;
         private const float SmearLinger = 0.25f;
 
@@ -43,7 +45,8 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
         private int attackId;
         private int flipTimer;
         private int trailCount;
-
+        //贴图握持位置，请根据贴图修改
+        private Vector2 gripPosition = new Vector2(112, 98);
         //传入最大时间
         private ref float MaxTime => ref Projectile.ai[0];
         //传入剩余时间
@@ -202,8 +205,8 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
         {
             Vector2 aim = (Main.MouseWorld - Player.MountedCenter).SafeNormalize(Vector2.UnitX * Player.direction);
             float[] angles = shouldSpin
-                ? new[] { MathHelper.PiOver4, -MathHelper.PiOver4 }
-                : new[] { MathHelper.PiOver4 * Projectile.direction + Main.rand.NextFloat(-0.15f, 0.15f) };
+                ? [MathHelper.PiOver4, -MathHelper.PiOver4] //十字交叉斩击
+                : [MathHelper.PiOver4 * Projectile.direction + Main.rand.NextFloat(-0.15f, 0.15f)];
 
             foreach (float angle in angles)
             {
@@ -245,23 +248,65 @@ namespace InfernalEclipseWeaponsDLC.Content.Projectiles.HealerPro.Scythes
         //手动绘制 拖影 → 金色残影 → 镰刀本体
         public override bool PreDraw(ref Color lightColor)
         {
+
+            Texture2D texture = TextureAssets.Projectile[Type].Value;
+            Vector2 origin = gripPosition;
+            //由于贴图中镰刀为斜着的，即 \ ，这里需要将其掰回正与实际碰撞箱吻合， 即 |
+            //因此减去原贴图角度，即顺时针旋转135°，变为正确起手位置
+            //注意：是否调整根据实际贴图进行修改
+            float axis = -MathHelper.PiOver4 - MathHelper.PiOver2;
+            SpriteEffects effects = SpriteEffects.None;
+            if (mirror)
+            {
+                origin.Y = texture.Height - origin.Y;
+                axis = -axis;
+                //上下镜像翻转
+                effects = SpriteEffects.FlipVertically;
+            }
+
             if (Progress < 0.75f)
             {
-                // 拖影只在挥砍阶段画（前摇时刀也在动，但不画）；硬停后在 SmearLinger 内缩回刀身并淡出。
-                float t = 1f - Progress / 0.75f;
-                float smear = MathHelper.Clamp(1f - (t - BurstEnd - StopTime) / SmearLinger, 0f, 1f);
+                //挥舞阶段归一化
+                float endProgres = 1f - Progress / 0.75f;
+                float smear = MathHelper.Clamp(1f - (endProgres - BurstEnd - StopTime) / SmearLinger, 0f, 1f);
+
                 if (smear > 0.02f)
                 {
+                    //刀光
                     TwoPathsHelper.DrawSwingTrail(Projectile.Center, Projectile.oldRot, trailCount, TwoPathsHelper.BladeReach * Projectile.scale, TrailAngle, smear, TwoPathsHelper.LightTrail);
-                    // 在刀身最近经过的几个位置画叠加混合的金色残影，越旧越淡。
-                    for (int i = Math.Min(trailCount, GhostCount) - 1; i >= 1; i--)
-                        TwoPathsHelper.DrawScythe(Projectile.Center, Projectile.oldRot[i], TwoPathsSide.Light, mirror, Projectile.scale, TwoPathsHelper.Additive(TwoPathsHelper.LightGold, 0.4f * smear * (1f - i / (float)GhostCount)));
+                    //画旧再画新，实现新的绘制覆盖旧绘制，由于0号索引为本体
+                    for (int i = Math.Min(trailCount, GhostCount) - 1; i >= 1; i--) 
+                    {
+                        //残影
+                        Main.EntitySpriteDraw(
+                            texture,
+                            Projectile.Center - Main.screenPosition,
+                            null,
+                            (new Color(255, 210, 110) * 0.4f * smear * (1f - i / (float)GhostCount)) with { A = 0 }, //亮光残影影 等同于 TwoPathsHelper.Additive(TwoPathsHelper.LightGold, 0.4f * smear * (1f - i / (float)GhostCount))
+                            Projectile.oldRot[i] - axis,
+                            origin,
+                            Projectile.scale,
+                            effects,
+                            0f);
+                    }
                 }
             }
 
-            // 镰刀本体：只画光端那一半，受环境光影响但提亮 50%。
-            TwoPathsHelper.DrawScythe(Projectile.Center, Projectile.rotation, TwoPathsSide.Light, mirror, Projectile.scale, Color.Lerp(lightColor, Color.White, 0.5f));
+            //旋转 = 目标朝向 - 刀身在贴图里本来的朝向
+            Main.EntitySpriteDraw(
+                texture, 
+                Projectile.Center - Main.screenPosition, 
+                null, 
+                Color.Lerp(lightColor, Color.White, 0.5f), 
+                Projectile.rotation - axis, 
+                origin, 
+                Projectile.scale, 
+                effects, 
+                0f);
+
             return false;
         }
+
+
     }
 }
