@@ -106,16 +106,17 @@ namespace InfernalEclipseWeaponsDLC.Core.Players
 
         public override void PostUpdate()
         {
-            // 脱战衰减。
+            //脱战衰减
             if (++ticksSinceCredit > DecayDelay)
             {
                 Dark = MathHelper.Max(Dark - DecayPerTick, 0f);
                 Light = MathHelper.Max(Light - DecayPerTick, 0f);
             }
 
-            // 两条都空时退出平衡；两条都满时进入平衡。
+            //判断进入平衡状态
             if (Balance)
             {
+                //全掉才退出
                 if (Dark <= 0f && Light <= 0f)
                     Balance = false;
             }
@@ -128,9 +129,23 @@ namespace InfernalEclipseWeaponsDLC.Core.Players
                     BalanceEntryEffects();
             }
 
-            // 平时握着镰刀时，前臂伸向握点（镰刀本身由 TwoPathsHoldLayer 绘制）。
-            if (TwoPathsHoldLayer.ShowsIdleHold(Player))
+
+            if (Player.dead || Player.itemAnimation > 0 || Player.HeldItem.type != ModContent.ItemType<TwoPaths>() || ModLoader.HasMod("WeaponOutLite"))
+                return;
+
+            //在物块上水平移动时，不改变手臂
+            //模拟计算玩家向下移动2格像素时，垂直速度是否为0，从而判断玩家下方是否为物块
+            if (Collision.TileCollision(Player.position, new Vector2(0f, 2f) , Player.width, Player.height, false,false, (int)Player.gravDir).Y == 0f 
+                && Player.velocity.X != 0 )
+                return;
+
+            if (Player.ownedProjectileCounts[ModContent.ProjectileType<TwoPathsDarkHeld>()] == 0
+               && Player.ownedProjectileCounts[ModContent.ProjectileType<TwoPathsLightHeld>()] == 0
+               && Player.ownedProjectileCounts[ModContent.ProjectileType<TwoPathsBalanceSpin>()] == 0)
+            {
+                //针对单独绘制武器图层调整玩家手臂
                 Player.SetCompositeArmFront(true, Player.CompositeArmStretchAmount.Full, TwoPathsHoldLayer.ArmRotation(Player));
+            }
         }
 
         // 手里拿着神冥歧径时进入平衡：打断正在进行的攻击，生成带“双镰合一”开场的平衡旋转（ai[1] = 1）。
